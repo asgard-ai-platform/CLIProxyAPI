@@ -1,0 +1,195 @@
+# Fork-specific release workflow: build the container image and publish it to GHCR.
+#
+# This repository is a fork of router-for-me/CLIProxyAPI. The upstream workflows
+# (release, docker-image, auto-retarget-main-pr-to-dev, pr-path-guard,
+# agents-md-guard) are disabled in the repository's Actions settings instead of
+# being edited or deleted, so that merging upstream releases never conflicts with them.
+# See ASGARD.md for the full fork notes.
+#
+# Trigger: push a tag named v<upstream version>-asgard.<n>, e.g. v8.0.74-asgard.1.
+# Result:  ghcr.io/<owner>/<repo>:<tag>, plus ghcr.io/<owner>/<repo>:latest when
+#          this tag is the highest v*-asgard.* tag in the repository.
+
+name: asgard-image
+
+on:
+  push:
+    tags:
+      - 'v*-asgard.*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    outputs:
+      models_ref: ${{ steps.models.outputs.ref }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Pin models catalog revision
+        id: models
+        run: |
+          set -euo pipefail
+          ref="$(git ls-remote https://github.com/router-for-me/models.git refs/heads/main | cut -f1)"
+          if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "failed to resolve the models catalog revision: '$ref'" >&2
+            exit 1
+          fi
+          echo "models catalog revision: $ref"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Refresh models catalog
+        env:
+          MODELS_REPOSITORY_REF: ${{ steps.models.outputs.ref }}
+        run: bash .github/scripts/refresh-model-catalogs.sh
+      - name: Build
+        run: |
+          go build -o test-output ./cmd/server
+          rm -f test-output
+      - name: Vet
+        run: go vet ./internal/runtime/executor/ ./internal/config/ ./sdk/cliproxy/
+      - name: Test Vertex Claude patch
+        run: go test -count=1 -run 'VertexClaude' ./internal/runtime/executor/ ./internal/config/ ./sdk/cliproxy/
+      - name: Test touched packages
+        # TestServiceHeartbeatFailoverDoesNotDrainBlockingScope is flaky upstream (see ASGARD.md).
+        run: go test -count=1 -skip 'TestServiceHeartbeatFailoverDoesNotDrainBlockingScope' ./internal/runtime/executor/... ./internal/config/... ./internal/registry/... ./sdk/cliproxy/...
+
+  build:
+    name: build ${{ matrix.platform }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            pair: linux-amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            pair: linux-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Refresh models catalog
+        env:
+          MODELS_REPOSITORY_REF: ${{ needs.verify.outputs.models_ref }}
+        run: bash .github/scripts/refresh-model-catalogs.sh
+      - name: Set image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - name: Generate build metadata
+        run: |
+          echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "COMMIT=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            io.asgard.models-ref=${{ needs.verify.outputs.models_ref }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            COMMIT=${{ env.COMMIT }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: publish multi-arch manifest
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+      - name: Decide whether this tag is the newest asgard release
+        id: newest
+        run: |
+          set -euo pipefail
+          newest="$(git ls-remote --tags --refs origin 'refs/tags/v*-asgard.*' | sed 's#.*refs/tags/##' | sort -V | tail -n 1)"
+          echo "newest asgard tag: ${newest}; this tag: ${GITHUB_REF_NAME}"
+          if [[ "$newest" == "$GITHUB_REF_NAME" ]]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ steps.newest.outputs.latest == 'true' }}
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+      - name: Inspect image
+        run: docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}"
