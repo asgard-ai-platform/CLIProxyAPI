@@ -35,6 +35,8 @@ maintained by asgard-ai-platform. Everything follows upstream except the items b
 6. Tag and push **one tag at a time** by name:
    `git tag -a v8.0.N-asgard.1 -m "..."` then `git push origin v8.0.N-asgard.1`.
    Never use `--tags` or `--follow-tags`.
+   Push the tag right after creating it and do not run `git fetch` in between: with
+   `fetch.pruneTags=true` in your git config, a fetch deletes local tags that do not exist on the remote yet.
 
 ## Rules
 
