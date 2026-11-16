@@ -22,6 +22,21 @@ maintained by asgard-ai-platform. Everything follows upstream except the items b
   Pushing one builds and publishes `ghcr.io/asgard-ai-platform/cliproxyapi:<tag>`; the highest
   such tag also gets `:latest`.
 
+## Patch branch
+
+`feat/vertex-claude-rawpredict` holds only the Vertex Claude patch on top of an upstream release
+(currently v8.0.74): no CI workflow and no fork notes. It is a convenience export, for example to
+diff the patch or to prepare an update to the upstream pull request. `main` is the source of truth
+and never merges this branch.
+
+Refresh it lazily, only when the patch changes or when you need it: recreate it from the upstream
+release `main` is based on, cherry-pick the patch commits, and check that
+`git diff feat/vertex-claude-rawpredict main --stat` lists only `.github/workflows/asgard-image.yml`
+and `ASGARD.md`.
+
+Upstream pull request router-for-me/CLIProxyAPI#7507 is left as it is for upstream.
+Do not push fork-only changes (such as the moego JSON test fix) to its branch.
+
 ## Syncing a new upstream release
 
 1. `git fetch upstream --tags`
