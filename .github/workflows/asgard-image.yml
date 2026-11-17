@@ -25,6 +25,12 @@ on:
 permissions:
   contents: read
 
+# One run per tag at a time. A second run of the same tag (pushed by hand while the sync
+# dispatched it) waits, and then its guard sees the published image and refuses.
+concurrency:
+  group: asgard-image-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     name: verify
@@ -43,15 +49,28 @@ jobs:
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY,,}"
-          token="$(curl -fsS "https://ghcr.io/token?scope=repository:${repo}:pull" | jq -r '.token // empty' || true)"
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:${repo}:pull" | jq -r '.token // empty')" || {
+            echo "cannot get a GHCR token for ${repo}; is the package public?" >&2
+            exit 1
+          }
+          # GHCR answers 404 to a manifest request whose Accept does not match the image, so ask for
+          # every type. Only 404 lets the build go on: any other answer (a package that is private,
+          # an error of GHCR) must not look like "not published".
           code="$(curl -s -o /dev/null -w '%{http_code}' \
             -H "Authorization: Bearer ${token}" \
-            -H 'Accept: application/vnd.oci.image.index.v1+json' \
-            "https://ghcr.io/v2/${repo}/manifests/${GITHUB_REF_NAME}" || true)"
-          if [[ "$code" == "200" ]]; then
-            echo "the image ${GITHUB_REF_NAME} is already published; delete it from GHCR first if it really has to be rebuilt" >&2
-            exit 1
-          fi
+            -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${repo}/manifests/${GITHUB_REF_NAME}")" || code=""
+          case "$code" in
+            404) ;;
+            200)
+              echo "the image ${GITHUB_REF_NAME} is already published; delete it from GHCR first if it really has to be rebuilt" >&2
+              exit 1
+              ;;
+            *)
+              echo "cannot tell whether the image ${GITHUB_REF_NAME} is published: GHCR answered with HTTP ${code:-none}" >&2
+              exit 1
+              ;;
+          esac
       - name: Checkout
         uses: actions/checkout@v6
       - name: Set up Go

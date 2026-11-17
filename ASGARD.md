@@ -73,13 +73,16 @@ the open issues. It stops when:
 - **the upstream release changes `.github/workflows/`.** A new upstream workflow would become
   active in this fork, and the built-in token cannot push workflow files, so there is no branch
   either. Merge it by hand and review the workflows first.
-- **the image build fails.** The log of the `asgard-image` run says why; the next run retries.
+- **the image build fails.** The log of the `asgard-image` run says why; the next run retries, up
+  to 3 failed builds of the tag.
+- **upstream or GHCR cannot be read.** That is an error, never "nothing new": it opens an issue and
+  it does not close the open ones.
 
 The sync never overwrites an existing `sync/v8.x.y` branch (somebody may be working on it), and it
 deletes the branch only once `main` contains it.
 
 Only `v8.*` releases are followed. A new major version changes the module path, so it needs a
-decision by hand.
+decision by hand; the run warns (and says so in its summary) when upstream has one.
 
 Controls:
 
@@ -94,10 +97,24 @@ Things to know:
   sync dispatches `asgard-image.yml` itself. With a personal access token the tag push would start
   the build as well, and the dispatch would have to go.
 - `asgard-image.yml` refuses to run on anything but a `v*-asgard.*` tag and refuses to overwrite a
-  published image, because deployments pin the image digests. To rebuild one on purpose, delete
-  that version from GHCR first.
-- The gate runs upstream code, so it runs without the token; the token is only given to git for
-  the pushes.
+  published image, because deployments pin the image digests. The check fails closed: only an
+  HTTP 404 from GHCR lets the build go on, so a private package or an error of GHCR stops it
+  loudly. There is one run per tag at a time. To rebuild an image on purpose, delete that version
+  from GHCR first.
+- The gate runs upstream code. It runs on an export of the merged commit in a temporary directory
+  (not in the clone that is pushed) and without the token variables, so that code cannot add
+  commits, plant git hooks or read the token from the environment, and the sync pushes exactly the
+  commit that was verified. This is **not a sandbox**: code that runs in the same job on a
+  GitHub-hosted runner can still reach whatever the runner itself can. Real isolation needs the
+  merge and the gate in a job without write permissions and a second job that pushes. That is not
+  done; upstream's code is also what the image runs in production.
+- Image builds: when a build of a tag has failed 3 times, the sync stops starting new ones (each
+  one is a full multi-arch build). Start it by hand with
+  `gh workflow run asgard-image.yml --ref v8.x.y-asgard.1`. If the code has to change, the tag
+  cannot be moved: push `v8.x.y-asgard.2` by hand on the fixed commit; the sync goes on once
+  `v8.x.y` has any image.
+- A run starts no new version after 240 minutes and leaves the rest for the next run, so it ends
+  by itself instead of being killed by the job timeout.
 - The issues need Issues to be enabled in this fork and the `issues: write` permission of the
   workflow. A sync that is stopped still fails every 30 minutes, so the Actions tab stays red until
   the cause is fixed, but the issue is opened only once.
@@ -121,8 +138,9 @@ Use this when the automatic sync stopped on a conflict or a failed gate, or to s
 3. Resolve the conflicts: take upstream's side for everything that is not ours and re-apply our
    patch lines. `git diff v8.0.M..origin/main`, where `v8.0.M` is the upstream version `main` was
    based on, shows what the patch is. **Do all your changes inside the merge commit**:
-   `git commit -a --amend -m "Merge upstream v8.0.N"`. The sync tags the commit whose message is
-   exactly `Merge upstream v8.0.N`, so a fix in a separate commit on top would not be in the image.
+   `git commit -a --amend -m "Merge upstream v8.0.N"`. The sync tags the oldest commit on the
+   first-parent line of `main` that contains the upstream tag, which is that merge commit, so a
+   fix in a separate commit on top would not be in the image.
 4. Verify with the same gate as the automation: `bash .github/scripts/asgard-gate.sh`. It
    overwrites tracked catalog files, so restore them afterwards:
    `git checkout -- internal/registry/models`.

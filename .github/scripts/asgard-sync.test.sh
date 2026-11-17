@@ -32,7 +32,11 @@ install_fakes() {
 url="${*: -1}"
 case "$url" in
   */token*) echo '{"token":"t"}' ;;
-  */manifests/*) tag="${url##*/}"; if grep -qx "$tag" "$FAKE_PUBLISHED"; then echo 200; else echo 404; fi ;;
+  */manifests/*)
+    tag="${url##*/}"
+    if [ -e "$FAKE_GH/ghcr_error" ]; then echo 503
+    elif grep -qx "$tag" "$FAKE_PUBLISHED"; then echo 200
+    else echo 404; fi ;;
   */tags/list*) jq -R -s '{tags: (split("\n") | map(select(length > 0)))}' < "$FAKE_PUBLISHED" ;;
 esac
 EOF
@@ -48,7 +52,9 @@ case "$1 $2" in
   "issue create")
     title="$(arg_after --title "$@")"
     n=$(( $(wc -l < "$FAKE_GH/issues.txt" 2>/dev/null || echo 0) + 1 ))
-    echo "$n|open|$title" >> "$FAKE_GH/issues.txt"; echo "https://example.invalid/issues/$n"; exit 0 ;;
+    echo "$n|open|$title" >> "$FAKE_GH/issues.txt"
+    printf '#%s %s\n%s\n---\n' "$n" "$title" "$(arg_after --body "$@")" >> "$FAKE_GH/bodies.txt"
+    echo "https://example.invalid/issues/$n"; exit 0 ;;
   "issue close")
     sed -i.bak "s/^$3|open|/$3|closed|/" "$FAKE_GH/issues.txt"; exit 0 ;;
   "issue list")
@@ -58,10 +64,14 @@ case "$1 $2" in
       t="${search% in:title}"; t="${t#\"}"; t="${t%\"}"
       awk -F'|' -v t="$t" '$2=="open" && $3==t {print $1; exit}' "$FAKE_GH/issues.txt"
     else
-      awk -F'|' '$2=="open" {print $1}' "$FAKE_GH/issues.txt"
+      # like the real gh: all open issues as JSON, then the --jq expression of the script runs on it
+      jq -R -s 'split("\n") | map(select(length > 0) | split("|")) | map(select(.[1] == "open") | {number: (.[0] | tonumber), title: .[2]})' \
+        "$FAKE_GH/issues.txt" | jq -r "$(arg_after --jq "$@")"
     fi
     exit 0 ;;
   "run list")
+    if [ -e "$FAKE_GH/fail_list" ]; then echo "HTTP 502" >&2; exit 1; fi
+    case "$*" in *"--json conclusion"*) cat "$FAKE_GH/failed_count" 2>/dev/null || echo 0; exit 0 ;; esac
     tag="$(arg_after --branch "$@")"
     if [ -e "$FAKE_GH/dispatched" ] || [ -e "$FAKE_GH/join" ]; then
       # "stale" holds a number of calls that still return the old list after the dispatch, like
@@ -72,6 +82,8 @@ case "$1 $2" in
       line="$(sed -n "$((n + 1))p" "$FAKE_GH/after.txt")"
       if [ "$((n + 1))" -lt "$total" ]; then echo "$((n + 1))" > "$FAKE_GH/idx"; fi
       case "$line" in *"completed success"*) echo "$tag" >> "$FAKE_PUBLISHED" ;; esac
+      # "other_run_publishes": this run failed because another run published the image first
+      case "$line" in *"completed failure"*) [ -e "$FAKE_GH/other_run_publishes" ] && echo "$tag" >> "$FAKE_PUBLISHED" ;; esac
       echo "$line"
     else
       cat "$FAKE_GH/before.txt" 2>/dev/null || true
@@ -111,7 +123,9 @@ new_world() {
   cat > "$W/hooks.sh" <<EOF
 published_asgard_tags() { cat "$W/published.txt"; }
 image_exists() { grep -qx "\$1" "$W/published.txt"; }
-run_gate() { if [ -e GATE_FAIL ]; then echo "gate failed" >&2; return 1; fi; echo gate >> "$W/gate.log"; }
+if [ -z "\${ASGARD_TEST_REAL_GATE:-}" ]; then
+  run_gate() { if [ -e GATE_FAIL ]; then echo "gate failed" >&2; return 1; fi; echo gate >> "$W/gate.log"; }
+fi
 build_image() {
   echo "\$1" >> "$W/builds.log"
   if grep -qx "\$1" "$W/build_fail.txt"; then die "build of \$1 failed"; fi
@@ -150,6 +164,8 @@ origin_contains() { o merge-base --is-ancestor "$(git -C "$W/upstream.git" rev-p
 merge_commit_of() { o log --first-parent --merges --format=%H -n 1 --grep="^Merge upstream $1\$" main; }
 merge_order() { o log --first-parent --merges --reverse --format=%s main | tr '\n' ','; }
 merge_count() { o log --first-parent --merges --format=%H main | wc -l | tr -d ' '; }
+merge_n() { o log --first-parent --merges --reverse --format=%H main | sed -n "${1}p"; }
+issue_state() { awk -F'|' -v n="$1" '$1==n {print $2}' "$W/gh/issues.txt"; }
 branch_parents() { o rev-list --parents -n 1 "refs/heads/$1" | wc -w | tr -d ' '; }
 branch_subject() { o log -1 --format=%s "refs/heads/$1"; }
 builds() { tr '\n' ' ' < "$W/builds.log" | sed 's/ $//'; }
@@ -355,6 +371,78 @@ new_world; up_release v8.0.75
 run_sync
 check "exits 0" equals "$RC" 0
 check "only v8.0.75 is followed" equals "$(builds)" "v8.0.75-asgard.1"
+check "it warns that upstream has a newer major" out_has 'newer major'
+
+echo "# review: upstream cannot be read. That is an error, not 'up to date', and it must not close issues"
+new_world; up_release v8.0.75
+printf '1|open|asgard-sync stopped at v8.0.74: image build failed\n' > "$W/gh/issues.txt"
+run_sync ASGARD_UPSTREAM_URL="$W/does-not-exist.git"
+check "exits non-zero" not equals "$RC" 0
+check "it does not claim that it is up to date" not out_has 'up to date'
+check "the earlier issue stays open" equals "$(issue_state 1)" open
+check "a new issue reports that upstream cannot be read" issue_open_titled "asgard-sync stopped: cannot read upstream"
+check "nothing is built" equals "$(builds)" ""
+
+echo "# review: only the issues that asgard-sync opened are closed"
+new_world; up_release v8.0.75; printf 'v8.0.75-asgard.1\n' >> "$W/published.txt"
+printf '1|open|asgard-sync stopped at v8.0.70: merge conflict\n2|open|please review the helm values\n' > "$W/gh/issues.txt"
+run_sync
+check "exits 0" equals "$RC" 0
+check "the issue of the sync is closed" equals "$(issue_state 1)" closed
+check "a human's issue is left alone" equals "$(issue_state 2)" open
+
+echo "# review: versions merged by hand with other messages are tagged at their own merge"
+new_world; up_release v8.0.75; up_release v8.0.76
+(
+  cd "$W/patched" || exit 1
+  git fetch -q "$W/upstream.git" "+refs/tags/v8.0.75:refs/tags/v8.0.75" "+refs/tags/v8.0.76:refs/tags/v8.0.76"
+  git merge -q --no-ff -m "manual: bring in the 75 release" v8.0.75 && git merge -q --no-ff -m "manual: bring in the 76 release" v8.0.76
+  git push -q origin HEAD:refs/heads/main
+)
+git -C "$W/work" pull -q --ff-only
+run_sync
+check "exits 0" equals "$RC" 0
+check "v8.0.75-asgard.1 is at the merge of v8.0.75, so it does not contain v8.0.76" equals "$(origin_tag_commit v8.0.75-asgard.1)" "$(merge_n 1)"
+check "v8.0.76-asgard.1 is at the merge of v8.0.76" equals "$(origin_tag_commit v8.0.76-asgard.1)" "$(merge_n 2)"
+
+echo "# review: the gate runs on a copy, so upstream code cannot plant hooks, add commits or read the token"
+new_world; up_release v8.0.75
+cat > "$W/evil_gate.sh" <<EOF
+#!/usr/bin/env bash
+# stands in for upstream code that runs during the gate and tampers with the repository it sits in
+printf '%s\n' "\${GH_TOKEN:-unset}" > "$W/gate_saw_token.txt"
+mkdir -p .git/hooks
+printf '#!/bin/sh\nenv > "%s/hook_ran.txt"\n' "$W" > .git/hooks/pre-push
+chmod +x .git/hooks/pre-push
+git -c user.name=evil -c user.email=evil@x commit -q --allow-empty -m "injected by the gate"
+touch gate_ran_here
+EOF
+run_sync ASGARD_TEST_REAL_GATE=1 ASGARD_GATE_COMMAND="bash $W/evil_gate.sh" GH_TOKEN=secret-token
+check "exits 0" equals "$RC" 0
+check "the gate did not see the token" equals "$(cat "$W/gate_saw_token.txt" 2> /dev/null)" unset
+check "main got the merge, not a commit that the gate added" equals "$(origin_main)" "$(merge_commit_of v8.0.75)"
+check "no hook was planted in the clone that pushes" not test -e "$W/work/.git/hooks/pre-push"
+check "no hook ran during the push" not test -e "$W/hook_ran.txt"
+check "the gate did not touch the work tree" not test -e "$W/work/gate_ran_here"
+check "the work tree is clean" tree_clean
+
+echo "# review: a failed push says why"
+new_world; up_release v8.0.75
+printf '#!/bin/sh\necho "no pushes today" >&2\nexit 1\n' > "$W/origin.git/hooks/pre-receive"; chmod +x "$W/origin.git/hooks/pre-receive"
+run_sync
+check "exits non-zero" not equals "$RC" 0
+check "the issue carries what git said" grep -q 'no pushes today' "$W/gh/bodies.txt"
+check "an issue is open" issue_open_titled "asgard-sync stopped at v8.0.75: push failed"
+
+echo "# review: the time budget ends a run gracefully, the next run goes on"
+new_world; up_release v8.0.75; up_release v8.0.76
+run_sync ASGARD_TIME_BUDGET_MINUTES=0
+check "exits 0" equals "$RC" 0
+check "at least one version is followed" equals "$(builds)" "v8.0.75-asgard.1"
+check "the rest is left for the next run" not origin_has_tag v8.0.76-asgard.1
+check "the run says so" out_has 'time budget'
+run_sync
+check "the next run follows v8.0.76" equals "$(builds)" "v8.0.75-asgard.1 v8.0.76-asgard.1"
 
 echo "# refuses to run outside GitHub Actions"
 new_world
@@ -414,6 +502,35 @@ new_fakes; printf '400 queued \n' > "$W/gh/after.txt"
 BUILD_TIMEOUT=0 run_build v8.0.75-asgard.1
 check "a build that never finishes times out" not equals "$RC" 0
 check "the timeout is reported" grep -q 'did not finish' "$W/build.out"
+
+echo "# build_image (review): retry limit, other run wins, GHCR or gh errors"
+new_fakes; printf '100 completed failure\n' > "$W/gh/before.txt"; printf '101 queued \n101 completed success\n' > "$W/gh/after.txt"
+echo 3 > "$W/gh/failed_count"
+run_build v8.0.75-asgard.1
+check "after 3 failed builds no new one is started: stops" not equals "$RC" 0
+check "after 3 failed builds no new one is started: nothing is dispatched" not dispatched
+check "the report says what to do" grep -q 'by hand' "$W/build.out"
+
+new_fakes; printf '100 completed failure\n' > "$W/gh/before.txt"; printf '101 queued \n101 completed success\n' > "$W/gh/after.txt"
+echo 2 > "$W/gh/failed_count"
+run_build v8.0.75-asgard.1
+check "after 2 failed builds one more is started" equals "$RC" 0
+check "after 2 failed builds one more is started: dispatched" dispatched
+
+new_fakes; touch "$W/gh/other_run_publishes"; printf '300 queued \n300 completed failure\n' > "$W/gh/after.txt"
+run_build v8.0.75-asgard.1
+check "a failed run is fine when another run published the image" equals "$RC" 0
+
+new_fakes; touch "$W/gh/ghcr_error"
+run_build v8.0.75-asgard.1
+check "GHCR that cannot answer stops the sync" not equals "$RC" 0
+check "GHCR that cannot answer: nothing is dispatched" not dispatched
+check "GHCR that cannot answer: the report says so" grep -q 'cannot tell' "$W/build.out"
+
+new_fakes; touch "$W/gh/fail_list"
+run_build v8.0.75-asgard.1
+check "a failing run list stops the sync instead of dispatching again" not equals "$RC" 0
+check "a failing run list: nothing is dispatched" not dispatched
 
 echo
 echo "passed: $PASS  failed: $FAIL"

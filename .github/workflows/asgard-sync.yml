@@ -35,7 +35,9 @@ jobs:
   sync:
     if: github.event_name == 'workflow_dispatch' || vars.ASGARD_SYNC_ENABLED == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    # The script starts no new version after 240 minutes (ASGARD_TIME_BUDGET_MINUTES), and one
+    # version can take the gate plus a 60 minute build after that.
+    timeout-minutes: 340
     permissions:
       contents: write
       actions: write
@@ -44,7 +46,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: main
           fetch-depth: 0
           # The upstream code is built and tested during the sync, so the token is not left in
           # the checkout. The script hands it to git only for the pushes.
