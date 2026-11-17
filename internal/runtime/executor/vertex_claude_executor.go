@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
@@ -25,6 +26,82 @@ const vertexClaudeAnthropicVersion = "vertex-2023-10-16"
 
 // vertexClaudeBaseURL resolves the Vertex host for a location; tests override it.
 var vertexClaudeBaseURL = vertexBaseURL
+
+// vertexClaudeUnsupportedBetas lists the betas Vertex rejects with a 400
+// ("Unexpected value(s) ... for the anthropic-beta header"). Claude Code sends
+// all of them on every main-thread request, so they are not forwarded. Vertex
+// validates each value instead of ignoring unknown ones, and its support list
+// trails the first-party API, so this is a denylist of observed rejections
+// rather than an allowlist: betas that Vertex needs, such as per-turn-control,
+// keep flowing. An operator-configured header:Anthropic-Beta bypasses this list.
+var vertexClaudeUnsupportedBetas = map[string]struct{}{
+	claudeAdvisorToolBeta:    {},
+	claudeCacheDiagnosisBeta: {},
+	claudeMessageThreadsBeta: {},
+}
+
+// vertexClaudeBetaHeader merges every incoming Anthropic-Beta value into one
+// comma-separated line, dropping the betas Vertex rejects.
+func vertexClaudeBetaHeader(incoming http.Header) string {
+	var betas string
+	for _, value := range helps.HeaderValuesCaseInsensitive(incoming, "Anthropic-Beta") {
+		for beta := range strings.SplitSeq(value, ",") {
+			if _, blocked := vertexClaudeUnsupportedBetas[strings.ToLower(strings.TrimSpace(beta))]; blocked {
+				continue
+			}
+			betas = withClaudeBetaAppended(betas, beta)
+		}
+	}
+	return betas
+}
+
+// stripVertexClaudeUnsupportedFields removes the body fields that pair with the
+// betas in vertexClaudeUnsupportedBetas. Vertex rejects them whether or not the
+// beta was sent, and dropping only one side still ends in a 400. Advisor blocks
+// already present in messages are left alone: dropping conversation content
+// silently would corrupt the history, so those requests still fail upstream.
+func stripVertexClaudeUnsupportedFields(doc *ojson.Doc) {
+	_ = doc.Delete("diagnostics")
+	_ = doc.Delete("thread")
+
+	if system := doc.Get("system"); system.IsArray() {
+		for i, block := range system.Array() {
+			if block.Get("cache_control.scope").Exists() {
+				_ = doc.Delete(fmt.Sprintf("system.%d.cache_control.scope", i))
+			}
+		}
+	}
+
+	tools := doc.Get("tools")
+	if !tools.IsArray() {
+		return
+	}
+	entries := tools.Array()
+	var dropped []int
+	droppedNames := make(map[string]struct{})
+	for i, tool := range entries {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(tool.Get("type").String())), "advisor_") {
+			dropped = append(dropped, i)
+			droppedNames[tool.Get("name").String()] = struct{}{}
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	// Delete from the end so earlier indexes stay valid.
+	for _, idx := range slices.Backward(dropped) {
+		_ = doc.Delete(fmt.Sprintf("tools.%d", idx))
+	}
+	if len(dropped) == len(entries) {
+		// tool_choice is only valid next to a non-empty tools array.
+		_ = doc.Delete("tools")
+		_ = doc.Delete("tool_choice")
+		return
+	}
+	if _, forced := droppedNames[doc.Get("tool_choice.name").String()]; forced && doc.Get("tool_choice.type").String() == "tool" {
+		_ = doc.Delete("tool_choice")
+	}
+}
 
 // vertexClaudeRoute reports whether the request must use the Anthropic publisher
 // rawPredict path, returning the service account credentials when it does.
@@ -100,6 +177,7 @@ func (e *GeminiVertexExecutor) buildVertexClaudeRequest(ctx context.Context, req
 	} else {
 		_ = doc.Delete("stream")
 	}
+	stripVertexClaudeUnsupportedFields(doc)
 	// User payload rules are the last semantic step and are applied exactly once.
 	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, helps.PayloadRequestedModel(opts, req.Model), helps.PayloadRequestPath(opts), opts.Headers)
 	return doc.Bytes(), originalTranslated, nil
@@ -118,16 +196,10 @@ func (e *GeminiVertexExecutor) doVertexClaudeRequest(ctx context.Context, auth *
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	// Vertex gates per-message output_config and other beta fields on this
-	// header too. Keep the caller's opt-ins with the unchanged request body.
-	incomingHeaders := util.ResolveClientHeaders(httpReq, opts.Headers)
-	var betas string
-	for _, value := range helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta") {
-		for _, beta := range strings.Split(value, ",") {
-			betas = withClaudeBetaAppended(betas, beta)
-		}
-	}
-	// Vertex only honors the last repeated header line, so emit one joined value.
-	if betas != "" {
+	// header too. Keep the caller's opt-ins with the unchanged request body,
+	// minus the betas Vertex rejects. Vertex only honors the last repeated
+	// header line, so emit one joined value.
+	if betas := vertexClaudeBetaHeader(util.ResolveClientHeaders(httpReq, opts.Headers)); betas != "" {
 		httpReq.Header.Set("Anthropic-Beta", betas)
 	}
 	var attrs map[string]string
