@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/json"
@@ -209,6 +210,62 @@ func TestVertexClaudePayloadRulesRunAfterUnsupportedFieldStrip(t *testing.T) {
 			t.Fatalf("payload rule for diagnostics was overwritten: %s", body)
 		}
 	})
+}
+
+// The forced tool_choice check drops thinking and effort. It must see the request
+// after the advisor tool and any tool_choice naming it are gone, otherwise a
+// request that no longer forces tool use still loses its thinking settings.
+func TestVertexClaudeKeepsThinkingWhenForcedAdvisorChoiceIsRemoved(t *testing.T) {
+	const advisor = `{"type":"advisor_20260301","name":"advisor","model":"claude-opus-5-5"}`
+	const lookup = `{"name":"lookup","description":"d","input_schema":{"type":"object"}}`
+	for _, tc := range []struct {
+		name         string
+		tools        string
+		toolChoice   string
+		wantChoice   bool
+		wantThinking bool
+	}{
+		{name: "forced advisor next to another tool", tools: `[` + lookup + `,` + advisor + `]`, toolChoice: `{"type":"tool","name":"advisor"}`, wantThinking: true},
+		{name: "any with only advisor tools", tools: `[` + advisor + `]`, toolChoice: `{"type":"any"}`, wantThinking: true},
+		// Unchanged behavior: a forced choice that survives still disables thinking.
+		{name: "forced surviving tool", tools: `[` + lookup + `,` + advisor + `]`, toolChoice: `{"type":"tool","name":"lookup"}`, wantChoice: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runVertexClaudeModes(t, func(t *testing.T, stream bool) {
+				auth, capture := newVertexClaudeTestEnv(t, vertexClaudeOKResponder)
+				exec := vertexClaudeTestExecutor(nil)
+				payload := `{"model":"claude-sonnet-5-5","max_tokens":4096,"thinking":{"type":"enabled","budget_tokens":2048},"output_config":{"effort":"medium"},"tools":` + tc.tools + `,"tool_choice":` + tc.toolChoice + `,"messages":[{"role":"user","content":"hi"}]}`
+				req := cliproxyexecutor.Request{Model: "claude-sonnet-5-5", Payload: []byte(payload)}
+				opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
+				if stream {
+					result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if _, err = drainVertexClaudeStream(t, result); err != nil {
+						t.Fatal(err)
+					}
+				} else if _, err := exec.Execute(context.Background(), auth, req, opts); err != nil {
+					t.Fatal(err)
+				}
+				_, _, body := capture.get()
+				if got := ojson.GetBytes(body, "tool_choice").Exists(); got != tc.wantChoice {
+					t.Fatalf("tool_choice present = %v, want %v: %s", got, tc.wantChoice, body)
+				}
+				if got := ojson.GetBytes(body, "thinking").Exists(); got != tc.wantThinking {
+					t.Fatalf("thinking present = %v, want %v: %s", got, tc.wantThinking, body)
+				}
+				if got := ojson.GetBytes(body, "output_config.effort").Exists(); got != tc.wantThinking {
+					t.Fatalf("output_config.effort present = %v, want %v: %s", got, tc.wantThinking, body)
+				}
+				for _, tool := range ojson.GetBytes(body, "tools").Array() {
+					if strings.HasPrefix(tool.Get("type").String(), "advisor_") {
+						t.Fatalf("advisor tool reached Vertex: %s", body)
+					}
+				}
+			})
+		})
+	}
 }
 
 func TestStripVertexClaudeUnsupportedFields(t *testing.T) {

@@ -213,6 +213,9 @@ func (e *GeminiVertexExecutor) buildVertexClaudeRequest(ctx context.Context, req
 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); err != nil {
 		return nil, nil, err
 	}
+	// Strip first: a forced tool_choice that names a removed advisor tool disappears
+	// here, so it must not make the check below drop thinking and effort.
+	stripVertexClaudeUnsupportedFields(doc)
 	// Anthropic rejects thinking combined with forced tool use; mirror the Claude executor.
 	disableThinkingIfToolChoiceForcedDoc(doc)
 	// Vertex takes the model from the URL and requires anthropic_version in the body.
@@ -224,7 +227,6 @@ func (e *GeminiVertexExecutor) buildVertexClaudeRequest(ctx context.Context, req
 	} else {
 		_ = doc.Delete("stream")
 	}
-	stripVertexClaudeUnsupportedFields(doc)
 	// User payload rules are the last semantic step and are applied exactly once.
 	helps.ApplyPayloadConfigWithRequestDoc(e.cfg, baseModel, to.String(), from.String(), "", doc, originalTranslated, helps.PayloadRequestedModel(opts, req.Model), helps.PayloadRequestPath(opts), opts.Headers)
 	return doc.Bytes(), originalTranslated, nil
