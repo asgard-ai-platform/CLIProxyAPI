@@ -22,11 +22,12 @@ import (
 )
 
 type vertexClaudeCapture struct {
-	mu     sync.Mutex
-	path   string
-	auth   string
-	body   []byte
-	status int
+	mu      sync.Mutex
+	path    string
+	auth    string
+	body    []byte
+	headers http.Header
+	status  int
 }
 
 func (c *vertexClaudeCapture) get() (string, string, []byte) {
@@ -50,6 +51,7 @@ func newVertexClaudeTestEnv(t *testing.T, respond func(w http.ResponseWriter, st
 		capture.path = r.URL.Path
 		capture.auth = r.Header.Get("Authorization")
 		capture.body = b
+		capture.headers = r.Header.Clone()
 		capture.mu.Unlock()
 		respond(w, strings.HasSuffix(r.URL.Path, ":streamRawPredict"))
 	}))

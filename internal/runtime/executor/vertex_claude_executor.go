@@ -117,6 +117,19 @@ func (e *GeminiVertexExecutor) doVertexClaudeRequest(ctx context.Context, auth *
 		return nil, statusErr{code: http.StatusInternalServerError, msg: "internal server error"}
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
+	// Vertex gates per-message output_config and other beta fields on this
+	// header too. Keep the caller's opt-ins with the unchanged request body.
+	incomingHeaders := util.ResolveClientHeaders(httpReq, opts.Headers)
+	var betas string
+	for _, value := range helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta") {
+		for _, beta := range strings.Split(value, ",") {
+			betas = withClaudeBetaAppended(betas, beta)
+		}
+	}
+	// Vertex only honors the last repeated header line, so emit one joined value.
+	if betas != "" {
+		httpReq.Header.Set("Anthropic-Beta", betas)
+	}
 	var attrs map[string]string
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
