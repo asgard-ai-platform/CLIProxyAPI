@@ -228,6 +228,16 @@ func TestStripVertexClaudeUnsupportedFields(t *testing.T) {
 			want: `{"system":[{"type":"text","text":"a","cache_control":{"type":"ephemeral"}},{"type":"text","text":"b","cache_control":{"type":"ephemeral","ttl":"5m"}},{"type":"text","text":"c"}]}`,
 		},
 		{
+			name: "scope removed from tools, messages and the top level too",
+			in:   `{"cache_control":{"type":"ephemeral","scope":"global"},"tools":[{"name":"a","input_schema":{},"cache_control":{"type":"ephemeral","scope":"global","ttl":"1h"}}],"messages":[{"role":"user","content":[{"type":"text","text":"x","cache_control":{"type":"ephemeral","scope":"org"}},{"type":"text","text":"y"}]},{"role":"assistant","content":"plain string"}]}`,
+			want: `{"cache_control":{"type":"ephemeral"},"tools":[{"name":"a","input_schema":{},"cache_control":{"type":"ephemeral","ttl":"1h"}}],"messages":[{"role":"user","content":[{"type":"text","text":"x","cache_control":{"type":"ephemeral"}},{"type":"text","text":"y"}]},{"role":"assistant","content":"plain string"}]}`,
+		},
+		{
+			name: "a message text that merely contains the word scope is untouched",
+			in:   `{"messages":[{"role":"user","content":[{"type":"text","text":"the \"scope\" of work","cache_control":{"type":"ephemeral"}}]}]}`,
+			want: `{"messages":[{"role":"user","content":[{"type":"text","text":"the \"scope\" of work","cache_control":{"type":"ephemeral"}}]}]}`,
+		},
+		{
 			name: "all tools are advisors: tools and tool_choice removed",
 			in:   `{"tools":[{"type":"advisor_20260301","name":"advisor"}],"tool_choice":{"type":"auto"},"messages":[]}`,
 			want: `{"messages":[]}`,

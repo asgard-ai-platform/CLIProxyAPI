@@ -55,6 +55,41 @@ func vertexClaudeBetaHeader(incoming http.Header) string {
 	return betas
 }
 
+// stripVertexClaudeCacheScope removes cache_control.scope wherever a cache
+// breakpoint can carry it: the top level, tools, system blocks and message
+// content blocks. type and ttl are kept.
+func stripVertexClaudeCacheScope(doc *ojson.Doc) {
+	// Most requests carry no scope at all; skip walking large histories for them.
+	if !strings.Contains(doc.String(), `"scope"`) {
+		return
+	}
+	if doc.Get("cache_control.scope").Exists() {
+		_ = doc.Delete("cache_control.scope")
+	}
+	for _, key := range []string{"tools", "system"} {
+		if blocks := doc.Get(key); blocks.IsArray() {
+			for i, block := range blocks.Array() {
+				if block.Get("cache_control.scope").Exists() {
+					_ = doc.Delete(fmt.Sprintf("%s.%d.cache_control.scope", key, i))
+				}
+			}
+		}
+	}
+	if messages := doc.Get("messages"); messages.IsArray() {
+		for i, message := range messages.Array() {
+			content := message.Get("content")
+			if !content.IsArray() {
+				continue
+			}
+			for j, block := range content.Array() {
+				if block.Get("cache_control.scope").Exists() {
+					_ = doc.Delete(fmt.Sprintf("messages.%d.content.%d.cache_control.scope", i, j))
+				}
+			}
+		}
+	}
+}
+
 // stripVertexClaudeUnsupportedFields removes the body fields that pair with the
 // betas in vertexClaudeUnsupportedBetas. Vertex rejects them whether or not the
 // beta was sent, and dropping only one side still ends in a 400. Advisor blocks
@@ -64,13 +99,7 @@ func stripVertexClaudeUnsupportedFields(doc *ojson.Doc) {
 	_ = doc.Delete("diagnostics")
 	_ = doc.Delete("thread")
 
-	if system := doc.Get("system"); system.IsArray() {
-		for i, block := range system.Array() {
-			if block.Get("cache_control.scope").Exists() {
-				_ = doc.Delete(fmt.Sprintf("system.%d.cache_control.scope", i))
-			}
-		}
-	}
+	stripVertexClaudeCacheScope(doc)
 
 	tools := doc.Get("tools")
 	if !tools.IsArray() {
