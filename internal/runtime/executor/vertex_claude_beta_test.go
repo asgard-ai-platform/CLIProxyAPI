@@ -30,10 +30,12 @@ func TestVertexClaudeForwardsBetaWithoutRewritingEffortDirectives(t *testing.T) 
 			want        []string
 		}{
 			{name: "native", headers: http.Header{"Anthropic-Beta": {beta}}, want: []string{beta}},
-			{name: "multiple lowercase values", headers: http.Header{"anthropic-beta": {" " + beta + " ", "", "mid-conversation-output-config-2026-07-01,effort-2025-11-24"}}, want: []string{beta, "mid-conversation-output-config-2026-07-01,effort-2025-11-24"}},
+			{name: "multiple lowercase values", headers: http.Header{"anthropic-beta": {" " + beta + " ", "", "mid-conversation-output-config-2026-07-01,effort-2025-11-24"}}, want: []string{beta + ",mid-conversation-output-config-2026-07-01,effort-2025-11-24"}},
+			{name: "split values deduplicated in order", headers: http.Header{"Anthropic-Beta": {" , " + beta + ",effort-2025-11-24, " + beta, " effort-2025-11-24, ,mid-conversation-output-config-2026-07-01, "}}, want: []string{beta + ",effort-2025-11-24,mid-conversation-output-config-2026-07-01"}},
+			{name: "empty comma values", headers: http.Header{"Anthropic-Beta": {", ,", " ,"}}},
 			{name: "no implicit opt in"},
 			{name: "request context", contextOnly: true, headers: http.Header{"Anthropic-Beta": {beta}}, want: []string{beta}},
-			{name: "operator override", headers: http.Header{"Anthropic-Beta": {beta}}, override: "operator-beta", want: []string{"operator-beta"}},
+			{name: "operator override", headers: http.Header{"Anthropic-Beta": {beta, "effort-2025-11-24"}}, override: "operator-beta", want: []string{"operator-beta"}},
 		} {
 			t.Run(mode+"/"+tc.name, func(t *testing.T) {
 				auth, capture := newVertexClaudeTestEnv(t, func(w http.ResponseWriter, stream bool) {
