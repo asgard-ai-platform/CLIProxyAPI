@@ -21,6 +21,9 @@ maintained by asgard-ai-platform. Everything follows upstream except the items b
 - Release tags are named `v<upstream version>-asgard.<n>`, for example `v8.0.74-asgard.1`.
   Pushing one builds and publishes `ghcr.io/asgard-ai-platform/cliproxyapi:<tag>`; the highest
   such tag also gets `:latest`.
+- This repository (`origin`) only carries our `v*-asgard.*` tags. Upstream release tags
+  (`v8.0.N`) live only on the `upstream` remote, so `git fetch upstream --tags` is what makes them
+  available locally. That includes the `v8.0.N` in `git diff v8.0.N..main` above.
 
 ## Patch branch
 
@@ -39,7 +42,11 @@ Do not push fork-only changes (such as the moego JSON test fix) to its branch.
 
 ## Syncing a new upstream release
 
-1. `git fetch upstream --tags`
+1. `git -c fetch.pruneTags=false fetch upstream --tags`
+   With `fetch.pruneTags=true` in your git config, every fetch deletes the local tags that the
+   fetched remote does not have. `origin` only has our `-asgard.` tags and `upstream` only has the
+   upstream ones, so each plain `git fetch` would wipe the other set. Either pass the `-c` flag
+   as above or run `git config --local fetch.pruneTags false` once in your clone.
 2. `git switch -c sync/v8.0.N main`, then `git merge --no-ff -m "Merge upstream v8.0.N" v8.0.N`.
    Merge the release tag, not `upstream/main`.
 3. Resolve conflicts, then run `go build ./cmd/server` and the Vertex Claude tests
