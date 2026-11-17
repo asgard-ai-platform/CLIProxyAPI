@@ -53,18 +53,29 @@ Do not push fork-only changes (such as the moego JSON test fix) to its branch.
    (`go test -run VertexClaude ./internal/runtime/executor/ ./internal/config/ ./sdk/cliproxy/`).
 4. Check whether upstream added or changed files under `.github/workflows/`. Disable any new
    upstream workflow that runs on tags or pull requests (see below).
-5. Fast-forward `main`: `git push origin sync/v8.0.N:main`.
+5. Fast-forward `main`: `git -c push.followTags=false push origin sync/v8.0.N:main`.
+   Run it with `--dry-run` first and check that it updates only `main` and pushes no tag.
 6. Tag and push **one tag at a time** by name:
-   `git tag -a v8.0.N-asgard.1 -m "..."` then `git push origin v8.0.N-asgard.1`.
-   Never use `--tags` or `--follow-tags`.
+   `git tag -a v8.0.N-asgard.1 -m "..."` then
+   `git -c push.followTags=false push origin refs/tags/v8.0.N-asgard.1`.
+   Never use `--tags` or `--follow-tags`, and check with `--dry-run` first that exactly one tag is pushed.
+   Before pushing the first tag, confirm that the upstream workflows listed under Rules are still disabled.
    Push the tag right after creating it and do not run `git fetch` in between: with
    `fetch.pruneTags=true` in your git config, a fetch deletes local tags that do not exist on the remote yet.
+   Pushing a tag starts the image build; wait for it to succeed before pushing the next tag.
 
 ## Rules
 
 - Do **not** use GitHub's "Sync fork" button. It merges upstream `main`, not a release tag.
-- Do **not** squash or rebase merge anything that contains upstream commits. It rewrites them and
-  breaks the ancestry that later merges rely on. Only our own changes may be squashed.
+- Squash merge and rebase merge are disabled in the repository settings; only merge commits are
+  allowed. Never rewrite commits that contain upstream history, because it breaks the ancestry
+  that later merges rely on.
+- `main` is a protected branch: force pushes and deletion are blocked, and this also applies to
+  admins. Pull requests are not required, so upstream syncs are fast-forwarded directly. To force
+  push you must first remove the protection explicitly (and restore it afterwards).
+- `push.followTags=true` in a global git config makes **every** push carry all annotated tags that
+  the remote does not have yet, even when the command names a single tag or only a branch. Tags
+  start the image build, so always pass `-c push.followTags=false` and use `--dry-run` first.
 - The upstream workflows `release.yaml`, `docker-image.yml`, `auto-retarget-main-pr-to-dev.yml`,
   `pr-path-guard.yml` and `agents-md-guard.yml` are disabled in the repository's Actions settings.
   They must stay disabled: tags matching `v*-asgard.*` would otherwise also trigger the upstream
