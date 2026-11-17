@@ -60,16 +60,23 @@ GHCR, so a failed image build is retried and not forgotten. The automation never
 versions older than the newest image.
 
 It stops, and the run fails, instead of skipping a version (later versions contain the earlier
-ones). The next run tries again from the same place. It stops when:
+ones). When it stops it opens an issue labelled `asgard-sync` (once per problem, so there is no
+flood), and the next run tries again from the same place. The first run that gets through closes
+the open issues. It stops when:
 
-- **the merge conflicts.** Merge the tag by hand as in "Syncing by hand" up to step 5 and push
-  `main`; the next run then creates the tag and builds the image.
-- **the gate fails.** Nothing was pushed. Fix the cause, or add a known upstream failure to the
-  gate and to the list below.
+- **the merge conflicts.** The attempt, with the conflict markers committed, is pushed to the
+  branch `sync/v8.x.y`: a merge commit with two parents named
+  `Merge upstream v8.x.y (UNRESOLVED CONFLICTS in <files>)`. See "Syncing by hand".
+- **the gate fails.** `main` was not changed. The clean merge is pushed to `sync/v8.x.y` as
+  `Merge upstream v8.x.y (verification failed, needs fixes)`. Fix the cause (or add a known
+  upstream failure to the gate and to the list below), see "Syncing by hand".
 - **the upstream release changes `.github/workflows/`.** A new upstream workflow would become
-  active in this fork, and the built-in token cannot push workflow files. Merge it by hand and
-  review the workflows first.
+  active in this fork, and the built-in token cannot push workflow files, so there is no branch
+  either. Merge it by hand and review the workflows first.
 - **the image build fails.** The log of the `asgard-image` run says why; the next run retries.
+
+The sync never overwrites an existing `sync/v8.x.y` branch (somebody may be working on it), and it
+deletes the branch only once `main` contains it.
 
 Only `v8.*` releases are followed. A new major version changes the module path, so it needs a
 decision by hand.
@@ -91,33 +98,53 @@ Things to know:
   that version from GHCR first.
 - The gate runs upstream code, so it runs without the token; the token is only given to git for
   the pushes.
-- There is no notification besides the failed run in the Actions tab (issues are disabled in this
-  fork). A sync that is stopped fails every 30 minutes until the cause is fixed.
+- The issues need Issues to be enabled in this fork and the `issues: write` permission of the
+  workflow. A sync that is stopped still fails every 30 minutes, so the Actions tab stays red until
+  the cause is fixed, but the issue is opened only once.
 - The published tags are read from GHCR without pagination (up to 1000 tags).
 
 ## Syncing by hand
 
-1. `git -c fetch.pruneTags=false fetch upstream --tags`
+Use this when the automatic sync stopped on a conflict or a failed gate, or to sync without it.
+
+1. Fetch both remotes without losing tags:
+   `git -c fetch.pruneTags=false fetch origin` and `git -c fetch.pruneTags=false fetch upstream --tags`.
    With `fetch.pruneTags=true` in your git config, every fetch deletes the local tags that the
    fetched remote does not have. `origin` only has our `-asgard.` tags and `upstream` only has the
    upstream ones, so each plain `git fetch` would wipe the other set. Either pass the `-c` flag
-   as above or run `git config --local fetch.pruneTags false` once in your clone.
-2. `git switch -c sync/v8.0.N main`, then `git merge --no-ff -m "Merge upstream v8.0.N" v8.0.N`.
-   Merge the release tag, not `upstream/main`.
-3. Resolve conflicts, then run `go build ./cmd/server` and the Vertex Claude tests
-   (`go test -run VertexClaude ./internal/runtime/executor/ ./internal/config/ ./sdk/cliproxy/`).
-4. Check whether upstream added or changed files under `.github/workflows/`. Disable any new
-   upstream workflow that runs on tags or pull requests (see below).
-5. Fast-forward `main`: `git -c push.followTags=false push origin sync/v8.0.N:main`.
+   or run `git config --local fetch.pruneTags false` once in your clone.
+2. Start from `origin/main`, not from a local `main`, which may be behind because the automation
+   pushes to it: `git switch -c sync/v8.0.N origin/main`, then
+   `git merge --no-ff -m "Merge upstream v8.0.N" v8.0.N`. Merge the release tag, not `upstream/main`.
+   After a stop, the branch `origin/sync/v8.0.N` already holds the attempt: start from it instead
+   (`git switch -c sync/v8.0.N origin/sync/v8.0.N`) and find the markers with `git grep -n '<<<<<<<'`.
+3. Resolve the conflicts: take upstream's side for everything that is not ours and re-apply our
+   patch lines. `git diff v8.0.M..origin/main`, where `v8.0.M` is the upstream version `main` was
+   based on, shows what the patch is. **Do all your changes inside the merge commit**:
+   `git commit -a --amend -m "Merge upstream v8.0.N"`. The sync tags the commit whose message is
+   exactly `Merge upstream v8.0.N`, so a fix in a separate commit on top would not be in the image.
+4. Verify with the same gate as the automation: `bash .github/scripts/asgard-gate.sh`. It
+   overwrites tracked catalog files, so restore them afterwards:
+   `git checkout -- internal/registry/models`.
+5. Check whether upstream added or changed files under `.github/workflows/`. Disable any new
+   upstream workflow that runs on tags or pull requests (see Rules).
+6. Fast-forward `main`: `git -c push.followTags=false push origin sync/v8.0.N:main`.
    Run it with `--dry-run` first and check that it updates only `main` and pushes no tag.
-6. Tag and push **one tag at a time** by name:
-   `git tag -a v8.0.N-asgard.1 -m "..."` then
-   `git -c push.followTags=false push origin refs/tags/v8.0.N-asgard.1`.
-   Never use `--tags` or `--follow-tags`, and check with `--dry-run` first that exactly one tag is pushed.
-   Before pushing the first tag, confirm that the upstream workflows listed under Rules are still disabled.
-   Push the tag right after creating it and do not run `git fetch` in between: with
-   `fetch.pruneTags=true` in your git config, a fetch deletes local tags that do not exist on the remote yet.
-   Pushing a tag starts the image build; wait for it to succeed before pushing the next tag.
+   Then push the resolved commit to the sync branch as well, so that the sync sees the branch as
+   merged and deletes it: `git -c push.followTags=false push --force-with-lease origin sync/v8.0.N`.
+   Otherwise delete the branch by hand.
+7. **With the automation on, stop here.** The next run (or
+   `gh workflow run asgard-sync.yml -f dry_run=false` right away) finds the version in `main`,
+   creates the tag, builds the image and closes the issue.
+
+Without the automation, also tag and push **one tag at a time** by name:
+`git tag -a v8.0.N-asgard.1 -m "..."` then
+`git -c push.followTags=false push origin refs/tags/v8.0.N-asgard.1`.
+Never use `--tags` or `--follow-tags`, and check with `--dry-run` first that exactly one tag is pushed.
+Before pushing the first tag, confirm that the upstream workflows listed under Rules are still disabled.
+Push the tag right after creating it and do not run `git fetch` in between: with
+`fetch.pruneTags=true` in your git config, a fetch deletes local tags that do not exist on the remote yet.
+Pushing a tag starts the image build; wait for it to succeed before pushing the next tag.
 
 ## Rules
 
