@@ -1,0 +1,65 @@
+# Follow upstream releases automatically (see ASGARD.md, "Automatic sync").
+#
+# Every run looks for upstream release tags newer than the newest published image and, oldest
+# first, merges each into main, verifies it, tags it v<version>-asgard.1 and builds its image.
+# It does not matter how many releases came out since the last run: all of them are followed.
+# The logic is in .github/scripts/asgard-sync.sh, which is tested offline by asgard-sync.test.sh.
+#
+# Scheduled runs do nothing until the repository variable ASGARD_SYNC_ENABLED is "true".
+# Set it to anything else to pause the automation. Manual runs always work, and they default
+# to a dry run that merges and verifies but pushes and builds nothing.
+
+name: asgard-sync
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run: merge and verify only, push and build nothing'
+        type: boolean
+        default: true
+
+# One run at a time: a catch-up of several versions can take longer than the interval.
+# A run that waits is replaced by a newer one, which is fine because every run looks at the
+# current state.
+concurrency:
+  group: asgard-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.event_name == 'workflow_dispatch' || vars.ASGARD_SYNC_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          # The upstream code is built and tested during the sync, so the token is not left in
+          # the checkout. The script hands it to git only for the pushes.
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Follow upstream releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASGARD_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+        run: |
+          set -euo pipefail
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::${auth}"
+          export ASGARD_GIT_AUTH="http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth}"
+          bash .github/scripts/asgard-sync.sh
