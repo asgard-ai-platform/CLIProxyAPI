@@ -137,6 +137,24 @@ func (e *GeminiVertexExecutor) vertexClaudeRoute(auth *cliproxyauth.Auth, model 
 	return projectID, location, saJSON, true
 }
 
+// vertexClaudeErrorLogLimit caps how much of an upstream error body is logged.
+const vertexClaudeErrorLogLimit = 512
+
+// vertexClaudeWarnsOnStatus reports whether an upstream status is worth a Warn
+// line: client errors other than 429, which the scheduler already handles and
+// which can be frequent under quota pressure.
+func vertexClaudeWarnsOnStatus(status int) bool {
+	return status >= http.StatusBadRequest && status < http.StatusInternalServerError && status != http.StatusTooManyRequests
+}
+
+// truncateVertexClaudeLog bounds an upstream error message before logging it.
+func truncateVertexClaudeLog(s string) string {
+	if r := []rune(s); len(r) > vertexClaudeErrorLogLimit {
+		return string(r[:vertexClaudeErrorLogLimit]) + "..."
+	}
+	return s
+}
+
 func vertexClaudeCountTokensError() error {
 	return statusErr{code: http.StatusNotImplemented, msg: "count tokens is not supported for Claude models on Vertex AI"}
 }
@@ -241,7 +259,15 @@ func (e *GeminiVertexExecutor) doVertexClaudeRequest(ctx context.Context, auth *
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		}
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		summary := helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b)
+		if vertexClaudeWarnsOnStatus(httpResp.StatusCode) {
+			// Vertex names the rejected beta or field in its 400 body; without this the
+			// access log only shows the status code.
+			helps.LogWithRequestID(ctx).Warnf("vertex executor: claude request rejected upstream: status=%d auth=%s anthropic-beta=%q message=%s",
+				httpResp.StatusCode, authID, httpReq.Header.Get("Anthropic-Beta"), truncateVertexClaudeLog(summary))
+		} else {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summary)
+		}
 		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
 	}
 	return httpResp, nil
