@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/MoeForge/moego/ojson"
@@ -25,6 +26,111 @@ const vertexClaudeAnthropicVersion = "vertex-2023-10-16"
 
 // vertexClaudeBaseURL resolves the Vertex host for a location; tests override it.
 var vertexClaudeBaseURL = vertexBaseURL
+
+// vertexClaudeUnsupportedBetas lists the betas Vertex rejects with a 400
+// ("Unexpected value(s) ... for the anthropic-beta header"). Claude Code sends
+// all of them on every main-thread request, so they are not forwarded. Vertex
+// validates each value instead of ignoring unknown ones, and its support list
+// trails the first-party API, so this is a denylist of observed rejections
+// rather than an allowlist: betas that Vertex needs, such as per-turn-control,
+// keep flowing. An operator-configured header:Anthropic-Beta bypasses this list.
+var vertexClaudeUnsupportedBetas = map[string]struct{}{
+	claudeAdvisorToolBeta:    {},
+	claudeCacheDiagnosisBeta: {},
+	claudeMessageThreadsBeta: {},
+}
+
+// vertexClaudeBetaHeader merges every incoming Anthropic-Beta value into one
+// comma-separated line, dropping the betas Vertex rejects.
+func vertexClaudeBetaHeader(incoming http.Header) string {
+	var betas string
+	for _, value := range helps.HeaderValuesCaseInsensitive(incoming, "Anthropic-Beta") {
+		for beta := range strings.SplitSeq(value, ",") {
+			if _, blocked := vertexClaudeUnsupportedBetas[strings.ToLower(strings.TrimSpace(beta))]; blocked {
+				continue
+			}
+			betas = withClaudeBetaAppended(betas, beta)
+		}
+	}
+	return betas
+}
+
+// stripVertexClaudeCacheScope removes cache_control.scope wherever a cache
+// breakpoint can carry it: the top level, tools, system blocks and message
+// content blocks. type and ttl are kept.
+func stripVertexClaudeCacheScope(doc *ojson.Doc) {
+	// Most requests carry no scope at all; skip walking large histories for them.
+	if !strings.Contains(doc.String(), `"scope"`) {
+		return
+	}
+	if doc.Get("cache_control.scope").Exists() {
+		_ = doc.Delete("cache_control.scope")
+	}
+	for _, key := range []string{"tools", "system"} {
+		if blocks := doc.Get(key); blocks.IsArray() {
+			for i, block := range blocks.Array() {
+				if block.Get("cache_control.scope").Exists() {
+					_ = doc.Delete(fmt.Sprintf("%s.%d.cache_control.scope", key, i))
+				}
+			}
+		}
+	}
+	if messages := doc.Get("messages"); messages.IsArray() {
+		for i, message := range messages.Array() {
+			content := message.Get("content")
+			if !content.IsArray() {
+				continue
+			}
+			for j, block := range content.Array() {
+				if block.Get("cache_control.scope").Exists() {
+					_ = doc.Delete(fmt.Sprintf("messages.%d.content.%d.cache_control.scope", i, j))
+				}
+			}
+		}
+	}
+}
+
+// stripVertexClaudeUnsupportedFields removes the body fields that pair with the
+// betas in vertexClaudeUnsupportedBetas. Vertex rejects them whether or not the
+// beta was sent, and dropping only one side still ends in a 400. Advisor blocks
+// already present in messages are left alone: dropping conversation content
+// silently would corrupt the history, so those requests still fail upstream.
+func stripVertexClaudeUnsupportedFields(doc *ojson.Doc) {
+	_ = doc.Delete("diagnostics")
+	_ = doc.Delete("thread")
+
+	stripVertexClaudeCacheScope(doc)
+
+	tools := doc.Get("tools")
+	if !tools.IsArray() {
+		return
+	}
+	entries := tools.Array()
+	var dropped []int
+	droppedNames := make(map[string]struct{})
+	for i, tool := range entries {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(tool.Get("type").String())), "advisor_") {
+			dropped = append(dropped, i)
+			droppedNames[tool.Get("name").String()] = struct{}{}
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	// Delete from the end so earlier indexes stay valid.
+	for _, idx := range slices.Backward(dropped) {
+		_ = doc.Delete(fmt.Sprintf("tools.%d", idx))
+	}
+	if len(dropped) == len(entries) {
+		// tool_choice is only valid next to a non-empty tools array.
+		_ = doc.Delete("tools")
+		_ = doc.Delete("tool_choice")
+		return
+	}
+	if _, forced := droppedNames[doc.Get("tool_choice.name").String()]; forced && doc.Get("tool_choice.type").String() == "tool" {
+		_ = doc.Delete("tool_choice")
+	}
+}
 
 // vertexClaudeRoute reports whether the request must use the Anthropic publisher
 // rawPredict path, returning the service account credentials when it does.
@@ -60,6 +166,24 @@ func (e *GeminiVertexExecutor) vertexClaudeRoute(auth *cliproxyauth.Auth, model 
 	return projectID, location, saJSON, true
 }
 
+// vertexClaudeErrorLogLimit caps how much of an upstream error body is logged.
+const vertexClaudeErrorLogLimit = 512
+
+// vertexClaudeWarnsOnStatus reports whether an upstream status is worth a Warn
+// line: client errors other than 429, which the scheduler already handles and
+// which can be frequent under quota pressure.
+func vertexClaudeWarnsOnStatus(status int) bool {
+	return status >= http.StatusBadRequest && status < http.StatusInternalServerError && status != http.StatusTooManyRequests
+}
+
+// truncateVertexClaudeLog bounds an upstream error message before logging it.
+func truncateVertexClaudeLog(s string) string {
+	if r := []rune(s); len(r) > vertexClaudeErrorLogLimit {
+		return string(r[:vertexClaudeErrorLogLimit]) + "..."
+	}
+	return s
+}
+
 func vertexClaudeCountTokensError() error {
 	return statusErr{code: http.StatusNotImplemented, msg: "count tokens is not supported for Claude models on Vertex AI"}
 }
@@ -89,6 +213,9 @@ func (e *GeminiVertexExecutor) buildVertexClaudeRequest(ctx context.Context, req
 	if err = helps.ApplyRequestThinkingDoc(doc, req, opts, from.String(), to.String(), e.Identifier()); err != nil {
 		return nil, nil, err
 	}
+	// Strip first: a forced tool_choice that names a removed advisor tool disappears
+	// here, so it must not make the check below drop thinking and effort.
+	stripVertexClaudeUnsupportedFields(doc)
 	// Anthropic rejects thinking combined with forced tool use; mirror the Claude executor.
 	disableThinkingIfToolChoiceForcedDoc(doc)
 	// Vertex takes the model from the URL and requires anthropic_version in the body.
@@ -118,16 +245,10 @@ func (e *GeminiVertexExecutor) doVertexClaudeRequest(ctx context.Context, auth *
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	// Vertex gates per-message output_config and other beta fields on this
-	// header too. Keep the caller's opt-ins with the unchanged request body.
-	incomingHeaders := util.ResolveClientHeaders(httpReq, opts.Headers)
-	var betas string
-	for _, value := range helps.HeaderValuesCaseInsensitive(incomingHeaders, "Anthropic-Beta") {
-		for _, beta := range strings.Split(value, ",") {
-			betas = withClaudeBetaAppended(betas, beta)
-		}
-	}
-	// Vertex only honors the last repeated header line, so emit one joined value.
-	if betas != "" {
+	// header too. Keep the caller's opt-ins with the unchanged request body,
+	// minus the betas Vertex rejects. Vertex only honors the last repeated
+	// header line, so emit one joined value.
+	if betas := vertexClaudeBetaHeader(util.ResolveClientHeaders(httpReq, opts.Headers)); betas != "" {
 		httpReq.Header.Set("Anthropic-Beta", betas)
 	}
 	var attrs map[string]string
@@ -169,7 +290,15 @@ func (e *GeminiVertexExecutor) doVertexClaudeRequest(ctx context.Context, auth *
 		if errRead != nil {
 			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
 		}
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		summary := helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b)
+		if vertexClaudeWarnsOnStatus(httpResp.StatusCode) {
+			// Vertex names the rejected beta or field in its 400 body; without this the
+			// access log only shows the status code.
+			helps.LogWithRequestID(ctx).Warnf("vertex executor: claude request rejected upstream: status=%d auth=%s anthropic-beta=%q message=%s",
+				httpResp.StatusCode, authID, httpReq.Header.Get("Anthropic-Beta"), truncateVertexClaudeLog(summary))
+		} else {
+			helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summary)
+		}
 		return nil, statusErr{code: httpResp.StatusCode, msg: string(b)}
 	}
 	return httpResp, nil
