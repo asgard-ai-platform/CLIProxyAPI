@@ -6,9 +6,13 @@
 # being edited or deleted, so that merging upstream releases never conflicts with them.
 # See ASGARD.md for the full fork notes.
 #
-# Trigger: push a tag named v<upstream version>-asgard.<n>, e.g. v8.0.74-asgard.1.
+# Trigger: a tag named v<upstream version>-asgard.<n>, e.g. v8.0.74-asgard.1, either pushed by
+#          hand or dispatched on the tag by asgard-sync.yml. Pushes made with the built-in
+#          GITHUB_TOKEN do not start workflows, which is why asgard-sync dispatches this one.
 # Result:  ghcr.io/<owner>/<repo>:<tag>, plus ghcr.io/<owner>/<repo>:latest when
 #          this tag is the highest v*-asgard.* tag in the repository.
+# It refuses to run on anything but such a tag, and to overwrite an image that is published,
+# because downstream deployments pin the image digests.
 
 name: asgard-image
 
@@ -16,17 +20,57 @@ on:
   push:
     tags:
       - 'v*-asgard.*'
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# One run per tag at a time. A second run of the same tag (pushed by hand while the sync
+# dispatched it) waits, and then its guard sees the published image and refuses.
+concurrency:
+  group: asgard-image-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   verify:
     name: verify
     runs-on: ubuntu-latest
     outputs:
-      models_ref: ${{ steps.models.outputs.ref }}
+      models_ref: ${{ steps.gate.outputs.ref }}
     steps:
+      - name: Require an asgard release tag
+        run: |
+          set -euo pipefail
+          if [[ ! "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+-asgard\.[0-9]+$ ]]; then
+            echo "asgard-image must run on a v<version>-asgard.<n> tag, not on '$GITHUB_REF'" >&2
+            exit 1
+          fi
+      - name: Refuse to overwrite a published image
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY,,}"
+          token="$(curl -fsS "https://ghcr.io/token?scope=repository:${repo}:pull" | jq -r '.token // empty')" || {
+            echo "cannot get a GHCR token for ${repo}; is the package public?" >&2
+            exit 1
+          }
+          # GHCR answers 404 to a manifest request whose Accept does not match the image, so ask for
+          # every type. Only 404 lets the build go on: any other answer (a package that is private,
+          # an error of GHCR) must not look like "not published".
+          code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${token}" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${repo}/manifests/${GITHUB_REF_NAME}")" || code=""
+          case "$code" in
+            404) ;;
+            200)
+              echo "the image ${GITHUB_REF_NAME} is already published; delete it from GHCR first if it really has to be rebuilt" >&2
+              exit 1
+              ;;
+            *)
+              echo "cannot tell whether the image ${GITHUB_REF_NAME} is published: GHCR answered with HTTP ${code:-none}" >&2
+              exit 1
+              ;;
+          esac
       - name: Checkout
         uses: actions/checkout@v6
       - name: Set up Go
@@ -34,32 +78,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Pin models catalog revision
-        id: models
-        run: |
-          set -euo pipefail
-          ref="$(git ls-remote https://github.com/router-for-me/models.git refs/heads/main | cut -f1)"
-          if [[ ! "$ref" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "failed to resolve the models catalog revision: '$ref'" >&2
-            exit 1
-          fi
-          echo "models catalog revision: $ref"
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-      - name: Refresh models catalog
-        env:
-          MODELS_REPOSITORY_REF: ${{ steps.models.outputs.ref }}
-        run: bash .github/scripts/refresh-model-catalogs.sh
-      - name: Build
-        run: |
-          go build -o test-output ./cmd/server
-          rm -f test-output
-      - name: Vet
-        run: go vet ./internal/runtime/executor/ ./internal/config/ ./sdk/cliproxy/
-      - name: Test Vertex Claude patch
-        run: go test -count=1 -run 'VertexClaude' ./internal/runtime/executor/ ./internal/config/ ./sdk/cliproxy/
-      - name: Test touched packages
-        # TestServiceHeartbeatFailoverDoesNotDrainBlockingScope is flaky upstream (see ASGARD.md).
-        run: go test -count=1 -skip 'TestServiceHeartbeatFailoverDoesNotDrainBlockingScope' ./internal/runtime/executor/... ./internal/config/... ./internal/registry/... ./sdk/cliproxy/...
+      - name: Verify
+        id: gate
+        run: bash .github/scripts/asgard-gate.sh
 
   build:
     name: build ${{ matrix.platform }}
@@ -110,6 +131,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=${{ github.ref_name }}
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v6
@@ -183,7 +208,7 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=ref,event=tag
+            type=raw,value=${{ github.ref_name }}
             type=raw,value=latest,enable=${{ steps.newest.outputs.latest == 'true' }}
       - name: Create manifest list and push
         working-directory: /tmp/digests
