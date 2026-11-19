@@ -1852,7 +1852,21 @@ func vertexBaseURL(location string) string {
 	return fmt.Sprintf("https://%s-aiplatform.googleapis.com", loc)
 }
 
+// vertexCloudPlatformScope is the OAuth scope Vertex AI service account tokens are issued for.
+const vertexCloudPlatformScope = "https://www.googleapis.com/auth/cloud-platform"
+
+// vertexAccessToken returns a service account access token. A token stays valid for about an
+// hour, so one is reused until shortly before it expires instead of signing a JWT and calling
+// the token endpoint on every request. A miss runs the exchange with this call's context.
 func vertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, saJSON []byte) (string, error) {
+	return helps.CachedVertexAccessToken(saJSON, vertexCloudPlatformScope, func() (string, time.Time, error) {
+		return fetchVertexAccessToken(ctx, cfg, auth, saJSON)
+	})
+}
+
+// fetchVertexAccessToken signs a JWT for the service account and exchanges it for an access
+// token, returning the token together with its expiry.
+func fetchVertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, saJSON []byte) (string, time.Time, error) {
 	// Token exchange stays on the credential or global proxy. The execution proxy
 	// applies only to the model request that follows.
 	tokenCtx := cliproxyexecutor.WithoutRequestProxyURL(ctx)
@@ -1860,15 +1874,15 @@ func vertexAccessToken(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		ctx = context.WithValue(ctx, oauth2.HTTPClient, httpClient)
 	}
 	// Use cloud-platform scope for Vertex AI.
-	creds, errCreds := google.CredentialsFromJSON(ctx, saJSON, "https://www.googleapis.com/auth/cloud-platform")
+	creds, errCreds := google.CredentialsFromJSON(ctx, saJSON, vertexCloudPlatformScope)
 	if errCreds != nil {
-		return "", fmt.Errorf("vertex executor: parse service account json failed: %w", errCreds)
+		return "", time.Time{}, fmt.Errorf("vertex executor: parse service account json failed: %w", errCreds)
 	}
 	tok, errTok := creds.TokenSource.Token()
 	if errTok != nil {
-		return "", fmt.Errorf("vertex executor: get access token failed: %w", errTok)
+		return "", time.Time{}, fmt.Errorf("vertex executor: get access token failed: %w", errTok)
 	}
-	return tok.AccessToken, nil
+	return tok.AccessToken, tok.Expiry, nil
 }
 
 // resolveVertexConfig finds the matching vertex-api-key configuration entry for the given auth.
