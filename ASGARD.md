@@ -212,6 +212,12 @@ Re-check this list on every sync.
 - `internal/runtime/executor`: `TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsConductorFailure`
   is flaky in every upstream version from v8.1.2 to v8.1.7 (it times out waiting for the conductor
   result; 10 to 30 failures in 100 runs on 2 cores). It is skipped by `.github/scripts/asgard-gate.sh`.
+- `internal/registry`: `TestEmbeddedCodexClientModelsCatalogOmitsAudioForGPT62SolAndGPT55` (added
+  in v8.1.3) asserts the content of the embedded Codex client models catalog, but the gate replaces
+  that catalog with the current revision of the models repository before it runs the tests. It
+  passes against the committed catalog and fails against the models repository revision `d02fed83`
+  (2026-11-27, which lists audio input for `gpt-6.2-sol`) in every version tested, v8.1.4 to v8.1.7.
+  It is skipped by `.github/scripts/asgard-gate.sh`.
 
 Upstream v8.1.2 and v8.1.3 were never published as images. Their own tests fail on the plain
 upstream tags (`TestIssue6825*`) and the tests of the package panic with a nil pointer dereference

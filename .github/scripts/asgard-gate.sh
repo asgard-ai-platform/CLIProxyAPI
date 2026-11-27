@@ -34,5 +34,6 @@ skip='TestServiceHeartbeatFailoverDoesNotDrainBlockingScope'
 skip+='|TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559'
 skip+='|TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCooldown'
 skip+='|TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsConductorFailure'
+skip+='|TestEmbeddedCodexClientModelsCatalogOmitsAudioForGPT62SolAndGPT55'
 go test -count=1 -skip "$skip" \
   ./internal/runtime/executor/... ./internal/config/... ./internal/registry/... ./sdk/cliproxy/...
