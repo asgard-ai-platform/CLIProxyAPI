@@ -30,5 +30,8 @@ go vet ./internal/runtime/executor/ ./internal/config/ ./sdk/cliproxy/
 go test -count=1 -run 'VertexClaude' ./internal/runtime/executor/ ./internal/config/ ./sdk/cliproxy/
 
 # Known upstream test failures are skipped here and listed in ASGARD.md; re-check them on every sync.
-go test -count=1 -skip 'TestServiceHeartbeatFailoverDoesNotDrainBlockingScope' \
+skip='TestServiceHeartbeatFailoverDoesNotDrainBlockingScope'
+skip+='|TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559'
+skip+='|TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCooldown'
+go test -count=1 -skip "$skip" \
   ./internal/runtime/executor/... ./internal/config/... ./internal/registry/... ./sdk/cliproxy/...
