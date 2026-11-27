@@ -72,7 +72,8 @@ the open issues. It stops when:
   upstream failure to the gate and to the list below), see "Syncing by hand".
 - **the upstream release changes `.github/workflows/`.** A new upstream workflow would become
   active in this fork, and the built-in token cannot push workflow files, so there is no branch
-  either. Merge it by hand and review the workflows first.
+  either. Merge it by hand and review the workflows first. This also applies to a workflow that
+  is disabled in this fork, because the check looks at the diff, not at the Actions settings.
 - **the image build fails.** The log of the `asgard-image` run says why; the next run retries, up
   to 3 failed builds of the tag.
 - **upstream or GHCR cannot be read.** That is an error, never "nothing new": it opens an issue and
@@ -177,9 +178,17 @@ Pushing a tag starts the image build; wait for it to succeed before pushing the 
   the remote does not have yet, even when the command names a single tag or only a branch. Tags
   start the image build, so always pass `-c push.followTags=false` and use `--dry-run` first.
 - The upstream workflows `release.yaml`, `docker-image.yml`, `auto-retarget-main-pr-to-dev.yml`,
-  `pr-path-guard.yml` and `agents-md-guard.yml` are disabled in the repository's Actions settings.
-  They must stay disabled: tags matching `v*-asgard.*` would otherwise also trigger the upstream
-  release and Docker Hub workflows.
+  `pr-path-guard.yml`, `agents-md-guard.yml` and `pr-test-build.yml` are disabled in the
+  repository's Actions settings. `release.yaml` and `docker-image.yml` must stay disabled: tags
+  matching `v*-asgard.*` would otherwise also trigger the upstream release and Docker Hub
+  workflows. The other four only run on pull requests and are disabled because this fork does not
+  need them.
+- GitHub can also disable all the workflows of a fork on its own: the Actions page then shows
+  "Workflows on this fork have been disabled", and the API still reports `enabled: true` and
+  `active` for every workflow. On 2026-11-27 the page showed this banner and no workflow had run
+  since 2026-11-21; it was enabled again with the button "I understand my workflows, go ahead and
+  enable them". After enabling, run `gh workflow list --all` and check that the workflows above
+  are still `disabled_manually`.
 - Keep the Go module path `github.com/router-for-me/CLIProxyAPI/v8` unchanged. Renaming it would
   conflict on every merge.
 
