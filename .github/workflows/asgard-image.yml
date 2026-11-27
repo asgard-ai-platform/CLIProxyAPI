@@ -2,7 +2,7 @@
 #
 # This repository is a fork of router-for-me/CLIProxyAPI. The upstream workflows
 # (release, docker-image, auto-retarget-main-pr-to-dev, pr-path-guard,
-# agents-md-guard) are disabled in the repository's Actions settings instead of
+# agents-md-guard, pr-test-build) are disabled in the repository's Actions settings instead of
 # being edited or deleted, so that merging upstream releases never conflicts with them.
 # See ASGARD.md for the full fork notes.
 #
