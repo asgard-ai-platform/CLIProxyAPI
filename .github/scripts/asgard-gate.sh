@@ -32,7 +32,6 @@ go test -count=1 -run 'VertexClaude' ./internal/runtime/executor/ ./internal/con
 # Known upstream test failures are skipped here and listed in ASGARD.md; re-check them on every sync.
 skip='TestServiceHeartbeatFailoverDoesNotDrainBlockingScope'
 skip+='|TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559'
-skip+='|TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCooldown'
 skip+='|TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsConductorFailure'
 skip+='|TestEmbeddedCodexClientModelsCatalogOmitsAudioForGPT62SolAndGPT55'
 go test -count=1 -skip "$skip" \

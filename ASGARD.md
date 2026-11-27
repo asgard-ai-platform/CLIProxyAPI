@@ -203,12 +203,6 @@ Re-check this list on every sync.
 - `sdk/cliproxy`: `TestPutOpenAICompatConcurrentWithAuthFieldsPatch_Issue6559` is flaky (a race in
   the registration of the management routes; it failed in about 1 to 2.5 percent of the runs when it
   was measured on 2 cores). It is skipped by `.github/scripts/asgard-gate.sh`.
-- `internal/runtime/executor`: `TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCooldown`
-  fails often at upstream v8.1.1 to v8.1.4 (a race in the recovery of the antigravity credits hint:
-  about 25 of 100 runs on 2 cores and most runs on 1 core, on the plain upstream tags without our
-  patch). It passes at v8.1.0 and from v8.1.5 on, where upstream fixed it in `41830213`. It is
-  skipped by `.github/scripts/asgard-gate.sh`; remove it from the skip list once `main` contains
-  v8.1.5.
 - `internal/runtime/executor`: `TestAIStudioExecutorClaudeMalformedFunctionCallCancelAfterErrorRecordsConductorFailure`
   is flaky in every upstream version from v8.1.2 to v8.1.7 (it times out waiting for the conductor
   result; 10 to 30 failures in 100 runs on 2 cores). It is skipped by `.github/scripts/asgard-gate.sh`.
@@ -221,10 +215,13 @@ Re-check this list on every sync.
 
 Upstream v8.1.2 and v8.1.3 were never published as images. Their own tests fail on the plain
 upstream tags (`TestIssue6825*`) and the tests of the package panic with a nil pointer dereference
-in `GeminiVertexExecutor.executeStreamWithServiceAccount` (`scanner` is used before it is assigned).
-Neither the failures nor the panic involve our patch. v8.1.4 showed no panic when it was tested, so
-it is merged and tagged `v8.1.4-asgard.1` by hand. The sync never goes back to versions older than
-the newest image, so it continues with v8.1.5 and does not publish v8.1.2 or v8.1.3.
+in the Vertex Imagen streaming path of `GeminiVertexExecutor.executeStreamWithServiceAccount`
+(that path never assigns `scanner`). Upstream fixed the panic in v8.1.4 (`db276e8b`). Neither the
+failures nor the panic involve our patch. The gate also skipped the credits test
+`TestAntigravityManagerExecuteAndStream_ToppedUpCreditsRecoverDuringQuotaCooldown` (a race in
+v8.1.1 to v8.1.4, fixed upstream in v8.1.5 by `41830213`) until `main` contained v8.1.5. v8.1.4 was
+merged and tagged `v8.1.4-asgard.1` by hand. The sync never goes back to versions older than the
+newest image, so it continued with v8.1.5 and did not publish v8.1.2 or v8.1.3.
 
 ## When upstream merges the Vertex Claude support
 
